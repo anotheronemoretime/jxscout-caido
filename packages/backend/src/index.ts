@@ -8,6 +8,7 @@ const DEFAULT_SETTINGS: Settings = {
   port: 3333,
   host: "localhost",
   filterInScope: true,
+  enabled: true,
 };
 
 let globalSettings: Settings | null = null;
@@ -61,14 +62,60 @@ const getSettings = async (sdk: SDK): Promise<Response<Settings>> => {
   }
 };
 
+const sendToJxscout = async (
+  sdk: SDK,
+  requestUrl: string,
+  requestRaw: string,
+  responseRaw: string
+): Promise<Response<void>> => {
+  if (!globalSettings) {
+    const settingsResponse = await getSettings(sdk);
+    if (settingsResponse.success) {
+      globalSettings = settingsResponse.data;
+    } else {
+      sdk.console.error(
+        `jxscout-caido: failed to load settings ${settingsResponse.error}`
+      );
+      globalSettings = DEFAULT_SETTINGS;
+    }
+  }
+
+  const settings = globalSettings;
+
+  const requestSpec = new RequestSpec("http://" + settings.host);
+  requestSpec.setPath("/caido-ingest");
+  requestSpec.setPort(settings.port);
+  requestSpec.setMethod("POST");
+  requestSpec.setHeader("content-type", "application/json");
+  requestSpec.setBody(
+    JSON.stringify({
+      requestUrl,
+      request: requestRaw,
+      response: responseRaw,
+    })
+  );
+
+  try {
+    await sdk.requests.send(requestSpec, {
+      save: false,
+    });
+    return ok(undefined);
+  } catch (err) {
+    sdk.console.error(`jxscout-caido: failed to send request ${err}`);
+    return error(`Failed to send request to jxscout: ${err}`);
+  }
+};
+
 export type API = DefineAPI<{
   saveSettings: typeof saveSettings;
   getSettings: typeof getSettings;
+  sendToJxscout: typeof sendToJxscout;
 }>;
 
 export function init(sdk: SDK<API>) {
   sdk.api.register("saveSettings", saveSettings);
   sdk.api.register("getSettings", getSettings);
+  sdk.api.register("sendToJxscout", sendToJxscout);
 
   sdk.events.onInterceptResponse(async (sdk, request, response) => {
     if (!globalSettings) {
@@ -85,29 +132,21 @@ export function init(sdk: SDK<API>) {
 
     const settings = globalSettings;
 
+    // Check if automatic interception is enabled
+    if (!settings.enabled) {
+      return;
+    }
+
     if (settings.filterInScope && !sdk.requests.inScope(request)) {
       return;
     }
 
-    const requestSpec = new RequestSpec("http://" + settings.host);
-    requestSpec.setPath("/caido-ingest");
-    requestSpec.setPort(settings.port);
-    requestSpec.setMethod("POST");
-    requestSpec.setHeader("content-type", "application/json");
-    requestSpec.setBody(
-      JSON.stringify({
-        requestUrl: request.getUrl(),
-        request: request.getRaw().toText(),
-        response: response.getRaw().toText(),
-      })
+    // Use the shared function to send to jxscout
+    await sendToJxscout(
+      sdk,
+      request.getUrl(),
+      request.getRaw().toText(),
+      response.getRaw().toText()
     );
-
-    try {
-      await sdk.requests.send(requestSpec, {
-        save: false,
-      });
-    } catch (err) {
-      sdk.console.error(`jxscout-caido: failed to send request ${err}`);
-    }
   });
 }

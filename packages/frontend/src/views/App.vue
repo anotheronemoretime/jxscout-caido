@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import Button from "primevue/button";
 import InputText from "primevue/inputtext";
+import Checkbox from "primevue/checkbox";
 
 import { useSDK } from "@/plugins/sdk";
 
@@ -12,6 +13,7 @@ const sdk = useSDK();
 const host = ref("");
 const port = ref("");
 const filterInScope = ref(false);
+const enabled = ref(true);
 const isLoading = ref(false);
 
 // Load settings from the backend
@@ -27,8 +29,9 @@ const loadSettings = async () => {
     const settings = response.data;
 
     host.value = settings.host;
-    port.value = settings.port;
+    port.value = settings.port.toString();
     filterInScope.value = settings.filterInScope;
+    enabled.value = settings.enabled ?? true;
   } catch (error) {
     sdk.window.showToast(`Failed to load settings: ${error}`, { variant: "error" });
   } finally {
@@ -44,6 +47,7 @@ const onSaveClick = async () => {
       host: host.value,
       port: parseInt(port.value),
       filterInScope: filterInScope.value,
+      enabled: enabled.value,
     });
     alert("Settings saved successfully!");
   } catch (error) {
@@ -75,8 +79,12 @@ onMounted(() => {
         <InputText id="port" v-model="port" placeholder="Port" :disabled="isLoading" />
       </div>
       <div class="flex items-center justify-between">
-        <label for="filter">Filter in scope:</label>
-        <input id="filter" type="checkbox" v-model="filterInScope" :disabled="isLoading" />
+        <label for="filter" class="cursor-pointer">Filter in scope:</label>
+        <Checkbox id="filter" v-model="filterInScope" :disabled="isLoading" binary />
+      </div>
+      <div class="flex items-center justify-between">
+        <label for="enabled" class="cursor-pointer">Enable automatic interception:</label>
+        <Checkbox id="enabled" v-model="enabled" :disabled="isLoading" binary />
       </div>
       <Button label="Save Settings" @click="onSaveClick" :disabled="isLoading" />
     </div>
