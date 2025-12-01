@@ -62,6 +62,51 @@ const getSettings = async (sdk: SDK): Promise<Response<Settings>> => {
   }
 };
 
+const fetchUrl = async (
+  sdk: SDK,
+  url: string
+): Promise<Response<{ requestRaw: string; responseRaw: string }>> => {
+  try {
+    const urlObj = new URL(url);
+    const scheme = urlObj.protocol === "https:" ? "https" : "http";
+    const host = urlObj.hostname;
+    const port = urlObj.port ? parseInt(urlObj.port) : (scheme === "https" ? 443 : 80);
+    const path = urlObj.pathname + urlObj.search;
+
+    // Construct the raw HTTP request from the URL
+    const hostHeader = port !== 80 && port !== 443 ? `${host}:${port}` : host;
+    const requestRaw = `GET ${path} HTTP/1.1\r\nHost: ${hostHeader}\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:145.0) Gecko/20100101 Firefox/145.0\r\nAccept: */*\r\nAccept-Language: fr,fr-FR;q=0.8,en-US;q=0.5,en;q=0.3\r\nAccept-Encoding: gzip, deflate\r\nConnection: keep-alive\r\n\r\n`;
+
+    // Construct the request spec using the URL
+    const requestSpec = new RequestSpec(scheme + "://" + host);
+    requestSpec.setPath(path);
+    requestSpec.setPort(port);
+    requestSpec.setMethod("GET");
+    requestSpec.setHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:145.0) Gecko/20100101 Firefox/145.0");
+    requestSpec.setHeader("Accept", "*/*");
+    requestSpec.setHeader("Accept-Language", "fr,fr-FR;q=0.8,en-US;q=0.5,en;q=0.3");
+    requestSpec.setHeader("Accept-Encoding", "gzip, deflate");
+    requestSpec.setHeader("Connection", "keep-alive");
+
+    // Send the request
+    const sentRequest = await sdk.requests.send(requestSpec, {
+      save: false,
+    });
+
+    // Get raw response from the sent request
+    if (!sentRequest.response) {
+      return error("No response received");
+    }
+
+    const responseRaw = sentRequest.response.getRaw().toText();
+
+    return ok({ requestRaw, responseRaw });
+  } catch (err) {
+    sdk.console.error(`jxscout-caido: failed to fetch URL ${url}: ${err}`);
+    return error(`Failed to fetch URL: ${err}`);
+  }
+};
+
 const sendToJxscout = async (
   sdk: SDK,
   requestUrl: string,
@@ -110,12 +155,14 @@ export type API = DefineAPI<{
   saveSettings: typeof saveSettings;
   getSettings: typeof getSettings;
   sendToJxscout: typeof sendToJxscout;
+  fetchUrl: typeof fetchUrl;
 }>;
 
 export function init(sdk: SDK<API>) {
   sdk.api.register("saveSettings", saveSettings);
   sdk.api.register("getSettings", getSettings);
   sdk.api.register("sendToJxscout", sendToJxscout);
+  sdk.api.register("fetchUrl", fetchUrl);
 
   sdk.events.onInterceptResponse(async (sdk, request, response) => {
     if (!globalSettings) {

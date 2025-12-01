@@ -96,12 +96,305 @@ export const init = (sdk: FrontendSDK) => {
     group: "Custom Commands",
   });
 
+  // Helper function to resolve URLs (absolute vs relative)
+  const resolveUrl = (baseUrl: string, src: string): string => {
+    // If src is already an absolute URL (starts with http:// or https://), return it as is
+    if (src.startsWith("http://") || src.startsWith("https://")) {
+      return src;
+    }
+
+    try {
+      const base = new URL(baseUrl);
+      
+      // If src starts with //, it's a protocol-relative URL
+      if (src.startsWith("//")) {
+        return `${base.protocol}${src}`;
+      }
+      
+      // If src starts with /, it's an absolute path from the domain root
+      if (src.startsWith("/")) {
+        return `${base.protocol}//${base.host}${src}`;
+      }
+      
+      // For relative paths, normalize the base URL first
+      // If baseUrl doesn't end with /, we need to treat the last segment as a file
+      // and resolve relative to its directory
+      let normalizedBaseUrl = baseUrl;
+      if (!base.pathname.endsWith("/")) {
+        // Remove the last segment (filename) to get the directory
+        const lastSlashIndex = base.pathname.lastIndexOf("/");
+        if (lastSlashIndex >= 0) {
+          normalizedBaseUrl = `${base.protocol}//${base.host}${base.pathname.substring(0, lastSlashIndex + 1)}`;
+          if (base.search) {
+            normalizedBaseUrl += base.search;
+          }
+          if (base.hash) {
+            normalizedBaseUrl += base.hash;
+          }
+        }
+      }
+      
+      // Use URL constructor to resolve relative URL
+      // This handles ./ ../ and normal relative paths correctly
+      return new URL(src, normalizedBaseUrl).href;
+    } catch (error) {
+      console.error("Error resolving URL:", error);
+      // Fallback: if resolution fails, try to construct manually
+      const base = new URL(baseUrl);
+      
+      if (src.startsWith("/")) {
+        // Absolute path
+        return `${base.protocol}//${base.host}${src}`;
+      } else {
+        // Relative path
+        let basePath = base.pathname;
+        if (!basePath.endsWith("/")) {
+          basePath = basePath.substring(0, basePath.lastIndexOf("/") + 1);
+        }
+        // Remove leading ./ if present
+        let relativePath = src;
+        if (relativePath.startsWith("./")) {
+          relativePath = relativePath.substring(2);
+        }
+        return `${base.protocol}//${base.host}${basePath}${relativePath}`;
+      }
+    }
+  };
+
+  // Helper function to extract script src attributes from HTML
+  const extractScriptSrcs = (html: string): string[] => {
+    const scriptSrcs: string[] = [];
+    // Use regex to find all <script> tags with src attribute
+    const scriptRegex = /<script[^>]*src\s*=\s*["']([^"']+)["'][^>]*>/gi;
+    let match;
+    
+    while ((match = scriptRegex.exec(html)) !== null) {
+      const src = match[1];
+      if (src && src.trim()) {
+        scriptSrcs.push(src.trim());
+      }
+    }
+    
+    return scriptSrcs;
+  };
+
+  // Helper function to extract link href attributes from HTML
+  const extractLinkHrefs = (html: string): string[] => {
+    const linkHrefs: string[] = [];
+    // Use regex to find all <link> tags with href attribute
+    const linkRegex = /<link[^>]*href\s*=\s*["']([^"']+)["'][^>]*>/gi;
+    let match;
+    
+    while ((match = linkRegex.exec(html)) !== null) {
+      const href = match[1];
+      if (href && href.trim()) {
+        linkHrefs.push(href.trim());
+      }
+    }
+    
+    return linkHrefs;
+  };
+
+  // Helper function to construct base URL from request
+  const getBaseUrl = (request: any): string => {
+    const scheme = request.isTls ? "https" : "http";
+    const host = request.host || "";
+    const port = request.port || (request.isTls ? 443 : 80);
+    const path = request.path || "/";
+    const query = request.query || "";
+    
+    let baseUrl = `${scheme}://${host}`;
+    if (port !== 80 && port !== 443) {
+      baseUrl += `:${port}`;
+    }
+    baseUrl += path;
+    if (query) {
+      baseUrl += `?${query}`;
+    }
+    return baseUrl;
+  };
+
+  // Helper function to fetch URLs and send to jxscout
+  const fetchAndSendUrls = async (urls: string[], resourceType: string): Promise<{ successCount: number; errorCount: number }> => {
+    let successCount = 0;
+    let errorCount = 0;
+
+    for (const url of urls) {
+      try {
+        // Use backend to fetch the resource
+        const fetchResult = await sdk.backend.fetchUrl(url);
+
+        if (fetchResult.success) {
+          const { requestRaw, responseRaw } = fetchResult.data;
+
+          // Send to jxscout
+          const result = await sdk.backend.sendToJxscout(
+            url,
+            requestRaw,
+            responseRaw
+          );
+
+          if (result.success) {
+            successCount++;
+          } else {
+            errorCount++;
+            console.error(`Failed to send ${resourceType} ${url} to jxscout:`, result.error);
+          }
+        } else {
+          errorCount++;
+          console.error(`Failed to fetch ${resourceType} ${url}:`, fetchResult.error);
+        }
+      } catch (error) {
+        errorCount++;
+        console.error(`Error processing ${resourceType} ${url}:`, error);
+      }
+    }
+
+    return { successCount, errorCount };
+  };
+
+  // Register command to send all scripts to JXScout
+  sdk.commands.register("jxscout:send-all-scripts", {
+    name: "Send all <script> to JXScout",
+    run: async (context) => {
+      try {
+        const response = context.response;
+        const request = context.request;
+
+        if (!response) {
+          sdk.window.showToast("No response found", { variant: "error" });
+          return;
+        }
+
+        if (!request) {
+          sdk.window.showToast("No request found", { variant: "error" });
+          return;
+        }
+
+        // Get the response body (HTML content)
+        const responseBody = response.raw || "";
+        
+        if (!responseBody) {
+          sdk.window.showToast("Response body is empty", { variant: "error" });
+          return;
+        }
+
+        // Extract all script src attributes
+        const scriptSrcs = extractScriptSrcs(responseBody);
+        
+        if (scriptSrcs.length === 0) {
+          sdk.window.showToast("No <script> tags with src attribute found", { variant: "info" });
+          return;
+        }
+
+        // Construct base URL from request
+        const baseUrl = getBaseUrl(request);
+
+        // Resolve all script URLs
+        const scriptUrls = scriptSrcs.map(src => resolveUrl(baseUrl, src));
+        
+        console.log(`Found ${scriptUrls.length} scripts to fetch:`, scriptUrls);
+
+        // Show progress
+        sdk.window.showToast(`Fetching ${scriptUrls.length} scripts...`, { variant: "info" });
+
+        // Fetch and send all scripts
+        const { successCount, errorCount } = await fetchAndSendUrls(scriptUrls, "script");
+
+        // Show final result
+        if (errorCount === 0) {
+          sdk.window.showToast(`Successfully sent ${successCount} scripts to JXScout!`, { variant: "success" });
+        } else {
+          sdk.window.showToast(`Sent ${successCount} scripts, ${errorCount} failed`, { variant: "warning" });
+        }
+      } catch (error) {
+        console.error("Failed to send scripts to JXScout:", error);
+        sdk.window.showToast(`Failed to send scripts: ${error}`, { variant: "error" });
+      }
+    },
+    group: "Custom Commands",
+  });
+
   // Add the command to the context menu for Response
   // This will appear when right-clicking on a response in HTTP Proxy
   sdk.menu.registerItem({
     type: "Response",
     commandId: "jxscout:send-response",
-    leadingIcon: "fas fa-hand",
+    leadingIcon: "fas fa-paper-plane",
+  });
+
+  // Register command to send all links to JXScout
+  sdk.commands.register("jxscout:send-all-links", {
+    name: "Send all <link> to JXScout",
+    run: async (context) => {
+      try {
+        const response = context.response;
+        const request = context.request;
+
+        if (!response) {
+          sdk.window.showToast("No response found", { variant: "error" });
+          return;
+        }
+
+        if (!request) {
+          sdk.window.showToast("No request found", { variant: "error" });
+          return;
+        }
+
+        // Get the response body (HTML content)
+        const responseBody = response.raw || "";
+        
+        if (!responseBody) {
+          sdk.window.showToast("Response body is empty", { variant: "error" });
+          return;
+        }
+
+        // Extract all link href attributes
+        const linkHrefs = extractLinkHrefs(responseBody);
+        
+        if (linkHrefs.length === 0) {
+          sdk.window.showToast("No <link> tags with href attribute found", { variant: "info" });
+          return;
+        }
+
+        // Construct base URL from request
+        const baseUrl = getBaseUrl(request);
+
+        // Resolve all link URLs
+        const linkUrls = linkHrefs.map(href => resolveUrl(baseUrl, href));
+        
+        console.log(`Found ${linkUrls.length} links to fetch:`, linkUrls);
+
+        // Show progress
+        sdk.window.showToast(`Fetching ${linkUrls.length} links...`, { variant: "info" });
+
+        // Fetch and send all links
+        const { successCount, errorCount } = await fetchAndSendUrls(linkUrls, "link");
+
+        // Show final result
+        if (errorCount === 0) {
+          sdk.window.showToast(`Successfully sent ${successCount} links to JXScout!`, { variant: "success" });
+        } else {
+          sdk.window.showToast(`Sent ${successCount} links, ${errorCount} failed`, { variant: "warning" });
+        }
+      } catch (error) {
+        console.error("Failed to send links to JXScout:", error);
+        sdk.window.showToast(`Failed to send links: ${error}`, { variant: "error" });
+      }
+    },
+    group: "Custom Commands",
+  });
+
+  sdk.menu.registerItem({
+    type: "Response",
+    commandId: "jxscout:send-all-scripts",
+    leadingIcon: "fas fa-code",
+  });
+
+  sdk.menu.registerItem({
+    type: "Response",
+    commandId: "jxscout:send-all-links",
+    leadingIcon: "fas fa-link",
   });
 
   // Add a sidebar item
