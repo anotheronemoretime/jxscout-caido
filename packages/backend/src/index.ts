@@ -13,6 +13,20 @@ const DEFAULT_SETTINGS: Settings = {
 
 let globalSettings: Settings | null = null;
 
+// Store for chunked data transfers
+interface ChunkSession {
+  requestUrl: string;
+  requestRaw: string;
+  responseRaw: string;
+  receivedChunks: number;
+  totalChunks: number;
+  timestamp: number;
+}
+
+const chunkSessions = new Map<string, ChunkSession>();
+const CHUNK_SIZE = 500 * 1024; // 500KB per chunk (safe for RPC)
+const SESSION_TIMEOUT = 60000; // 1 minute timeout for sessions
+
 function ok<T>(data: T): Response<T> {
   return {
     success: true,
@@ -107,6 +121,92 @@ const fetchUrl = async (
   }
 };
 
+// Clean up expired sessions
+const cleanupExpiredSessions = () => {
+  const now = Date.now();
+  for (const [sessionId, session] of chunkSessions.entries()) {
+    if (now - session.timestamp > SESSION_TIMEOUT) {
+      chunkSessions.delete(sessionId);
+    }
+  }
+};
+
+// Send chunked data to jxscout
+const sendToJxscoutChunk = async (
+  sdk: SDK,
+  sessionId: string,
+  chunkIndex: number,
+  totalChunks: number,
+  requestUrl: string | null,
+  requestRawChunk: string | null,
+  responseRawChunk: string | null
+): Promise<Response<{ complete: boolean }>> => {
+  cleanupExpiredSessions();
+
+  // Initialize or get session
+  let session = chunkSessions.get(sessionId);
+  if (!session) {
+    if (chunkIndex !== 0) {
+      return error("Session not found. Must start with chunk 0.");
+    }
+    session = {
+      requestUrl: requestUrl || "",
+      requestRaw: "",
+      responseRaw: "",
+      receivedChunks: 0,
+      totalChunks: totalChunks,
+      timestamp: Date.now(),
+    };
+    chunkSessions.set(sessionId, session);
+  }
+
+  // Validate chunk index
+  if (chunkIndex !== session.receivedChunks) {
+    return error(`Expected chunk ${session.receivedChunks}, got ${chunkIndex}`);
+  }
+
+  // Append chunks
+  if (chunkIndex === 0 && requestUrl) {
+    session.requestUrl = requestUrl;
+  }
+  if (requestRawChunk) {
+    session.requestRaw += requestRawChunk;
+  }
+  if (responseRawChunk) {
+    session.responseRaw += responseRawChunk;
+  }
+
+  session.receivedChunks++;
+  session.timestamp = Date.now();
+
+  // Check if all chunks received
+  if (session.receivedChunks >= session.totalChunks) {
+    // All chunks received, send to jxscout
+    try {
+      const result = await sendToJxscout(
+        sdk,
+        session.requestUrl,
+        session.requestRaw,
+        session.responseRaw
+      );
+      
+      // Clean up session
+      chunkSessions.delete(sessionId);
+      
+      if (result.success) {
+        return ok({ complete: true });
+      } else {
+        return error(result.error);
+      }
+    } catch (err) {
+      chunkSessions.delete(sessionId);
+      return error(`Failed to send to jxscout: ${err}`);
+    }
+  }
+
+  return ok({ complete: false });
+};
+
 const sendToJxscout = async (
   sdk: SDK,
   requestUrl: string,
@@ -155,6 +255,7 @@ export type API = DefineAPI<{
   saveSettings: typeof saveSettings;
   getSettings: typeof getSettings;
   sendToJxscout: typeof sendToJxscout;
+  sendToJxscoutChunk: typeof sendToJxscoutChunk;
   fetchUrl: typeof fetchUrl;
 }>;
 
@@ -162,6 +263,7 @@ export function init(sdk: SDK<API>) {
   sdk.api.register("saveSettings", saveSettings);
   sdk.api.register("getSettings", getSettings);
   sdk.api.register("sendToJxscout", sendToJxscout);
+  sdk.api.register("sendToJxscoutChunk", sendToJxscoutChunk);
   sdk.api.register("fetchUrl", fetchUrl);
 
   sdk.events.onInterceptResponse(async (sdk, request, response) => {

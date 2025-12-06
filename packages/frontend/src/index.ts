@@ -45,6 +45,15 @@ export const init = (sdk: FrontendSDK) => {
     body: root,
   });
 
+  // Helper function to chunk a string into smaller pieces
+  const chunkString = (str: string, chunkSize: number): string[] => {
+    const chunks: string[] = [];
+    for (let i = 0; i < str.length; i += chunkSize) {
+      chunks.push(str.substring(i, i + chunkSize));
+    }
+    return chunks;
+  };
+
   // Register command to send response to JXScout
   sdk.commands.register("jxscout:send-response", {
     name: "Send to JXScout",
@@ -80,12 +89,54 @@ export const init = (sdk: FrontendSDK) => {
 
         console.log("Sending to jxscout:", { requestUrl, requestRawLength: requestRaw.length, responseRawLength: responseRaw.length });
 
-        const result = await sdk.backend.sendToJxscout(requestUrl, requestRaw, responseRaw);
-
-        if (result.success) {
-          sdk.window.showToast("Response sent to JXScout successfully!", { variant: "success" });
+        // Send data in chunks if it's too large for RPC
+        const CHUNK_SIZE = 500 * 1024; // 500KB per chunk
+        const totalSize = requestRaw.length + responseRaw.length;
+        
+        if (totalSize > CHUNK_SIZE) {
+          // Use chunked transfer
+          const sessionId = `${Date.now()}-${Math.random().toString(36).substring(7)}`;
+          const requestRawChunks = chunkString(requestRaw, CHUNK_SIZE);
+          const responseRawChunks = chunkString(responseRaw, CHUNK_SIZE);
+          const totalChunks = Math.max(requestRawChunks.length, responseRawChunks.length);
+          
+          console.log(`Sending ${totalChunks} chunks for ${totalSize} bytes`);
+          
+          try {
+            for (let i = 0; i < totalChunks; i++) {
+              const result = await sdk.backend.sendToJxscoutChunk(
+                sessionId,
+                i,
+                totalChunks,
+                i === 0 ? requestUrl : null,
+                i < requestRawChunks.length ? requestRawChunks[i] : null,
+                i < responseRawChunks.length ? responseRawChunks[i] : null
+              );
+              
+              if (!result.success) {
+                sdk.window.showToast(`Failed to send chunk ${i + 1}/${totalChunks}: ${result.error}`, { variant: "error" });
+                return;
+              }
+              
+              if (result.data.complete) {
+                sdk.window.showToast("Response sent to JXScout successfully!", { variant: "success" });
+                return;
+              }
+            }
+          } catch (error) {
+            console.error("Failed to send chunks:", error);
+            sdk.window.showToast(`Failed to send response: ${error}`, { variant: "error" });
+            return;
+          }
         } else {
-          sdk.window.showToast(`Failed to send response: ${result.error}`, { variant: "error" });
+          // Small enough, send directly
+          const result = await sdk.backend.sendToJxscout(requestUrl, requestRaw, responseRaw);
+
+          if (result.success) {
+            sdk.window.showToast("Response sent to JXScout successfully!", { variant: "success" });
+          } else {
+            sdk.window.showToast(`Failed to send response: ${result.error}`, { variant: "error" });
+          }
         }
       } catch (error) {
         console.error("Failed to send response to JXScout:", error);
@@ -214,6 +265,52 @@ export const init = (sdk: FrontendSDK) => {
     return baseUrl;
   };
 
+  // Helper function to send data to jxscout (with chunking if needed)
+  const sendToJxscoutWithChunking = async (
+    requestUrl: string,
+    requestRaw: string,
+    responseRaw: string
+  ): Promise<{ success: boolean; error?: string }> => {
+    const CHUNK_SIZE = 500 * 1024; // 500KB per chunk
+    const totalSize = requestRaw.length + responseRaw.length;
+    
+    if (totalSize > CHUNK_SIZE) {
+      // Use chunked transfer
+      const sessionId = `${Date.now()}-${Math.random().toString(36).substring(7)}`;
+      const requestRawChunks = chunkString(requestRaw, CHUNK_SIZE);
+      const responseRawChunks = chunkString(responseRaw, CHUNK_SIZE);
+      const totalChunks = Math.max(requestRawChunks.length, responseRawChunks.length);
+      
+      try {
+        for (let i = 0; i < totalChunks; i++) {
+          const result = await sdk.backend.sendToJxscoutChunk(
+            sessionId,
+            i,
+            totalChunks,
+            i === 0 ? requestUrl : null,
+            i < requestRawChunks.length ? requestRawChunks[i] : null,
+            i < responseRawChunks.length ? responseRawChunks[i] : null
+          );
+          
+          if (!result.success) {
+            return { success: false, error: result.error };
+          }
+          
+          if (result.data.complete) {
+            return { success: true };
+          }
+        }
+        return { success: false, error: "Not all chunks were processed" };
+      } catch (error) {
+        return { success: false, error: String(error) };
+      }
+    } else {
+      // Small enough, send directly
+      const result = await sdk.backend.sendToJxscout(requestUrl, requestRaw, responseRaw);
+      return { success: result.success, error: result.success ? undefined : result.error };
+    }
+  };
+
   // Helper function to fetch URLs and send to jxscout
   const fetchAndSendUrls = async (urls: string[], resourceType: string): Promise<{ successCount: number; errorCount: number }> => {
     let successCount = 0;
@@ -227,12 +324,8 @@ export const init = (sdk: FrontendSDK) => {
         if (fetchResult.success) {
           const { requestRaw, responseRaw } = fetchResult.data;
 
-          // Send to jxscout
-          const result = await sdk.backend.sendToJxscout(
-            url,
-            requestRaw,
-            responseRaw
-          );
+          // Send to jxscout with chunking support
+          const result = await sendToJxscoutWithChunking(url, requestRaw, responseRaw);
 
           if (result.success) {
             successCount++;
